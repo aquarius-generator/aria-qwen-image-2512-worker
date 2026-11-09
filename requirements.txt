@@ -1,0 +1,14 @@
+# Pinned on purpose: a worker whose dependencies drift is a contestant that drifts, and this exists to be
+# one half of a fair comparison.
+runpod==1.7.7
+torch==2.6.0
+torchvision==0.21.0
+diffusers==0.33.1
+transformers==4.51.3
+accelerate==1.6.0
+safetensors==0.5.3
+sentencepiece==0.2.0
+torchao==0.10.0
+hf-transfer==0.1.9
+huggingface-hub==0.30.2
+Pillow==11.2.1
