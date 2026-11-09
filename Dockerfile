@@ -1,14 +1,18 @@
 # Qwen-Image-2512 (Apache-2.0) at FP8, as a RunPod Serverless worker.
 #
-# WHAT CHANGED AND WHY, because this is the whole fix:
-# The first build failed on RunPod's 1800 second ceiling. The log went quiet for about 27 minutes after pip
-# finished, which is exactly what baking the weights in looks like. Measured afterwards against the Hugging
-# Face API: the pinned revision is **57.7 GB across 30 files**. There is no build tuning that fits that
-# inside 30 minutes, and it would not have fit on the 60 GB container disk next to the image in any case.
+# THE BUILD BUDGET IS 1800 SECONDS AND THIS FILE HAS LOST TO IT TWICE, for two different reasons:
 #
-# So the image is now CODE AND DEPENDENCIES ONLY. The weights are fetched once on first start into a cache
-# that every later start reuses. That turns a 57.7 GB cost from something paid on every build into something
-# paid once per cache.
+#   Build 1 baked the weights in. Measured against the Hugging Face API, the pinned revision is 57.7 GB
+#   across 30 files. No build tuning fits that inside 30 minutes, and it would not have fitted on the 60 GB
+#   container disk next to the image either. The weights now load on FIRST START into a cache that later
+#   starts reuse, so that cost is paid once per cache instead of once per build.
+#
+#   Build 3 used ranged pip pins. The resolver backtracked across a tree containing torch and spent the
+#   whole budget searching, with no weights involved at all. Every version in requirements.txt is now exact.
+#
+# So the image is CODE AND DEPENDENCIES ONLY, and the dependency install is arranged to be boring: wheels
+# only, no resolution search, and torch in a layer of its own so a change to any other pin does not drag
+# the largest download in the set along with it.
 #
 # THE PINS STAY. A tag or a branch can be re-pointed upstream, and a blind comparison whose contestant
 # changed between the owner's first sitting and her second proves nothing. The revision below is an
@@ -18,6 +22,8 @@ FROM runpod/base:0.6.3-cuda12.4.1
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INPUT=1 \
     DIFFUSERS_VERBOSITY=error
 
 # The immutable weights reference. Named here, in the fetch step and in the handler, and echoed on every
@@ -33,12 +39,20 @@ ENV QWEN_VOLUME_CACHE="/runpod-volume/hf" \
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN python3 -m pip install --no-cache-dir --upgrade pip && \
-    python3 -m pip install --no-cache-dir -r /app/requirements.txt
+# Recorded in the build log on purpose: diffusers 0.42 requires Python 3.11 or newer, and a base image that
+# quietly ships something older would otherwise fail much later and much less clearly.
+RUN python3 --version
 
-# NOTE: there is deliberately NO `RUN python3 weights.py` here. That line is what made the first build fail,
-# and putting it back would reintroduce a 57.7 GB download inside a 1800 second budget.
+# torch first, alone. It is the largest part of the install by a wide margin, and keeping it in its own
+# layer means editing any other pin does not re-fetch it.
+RUN python3 -m pip install --no-cache-dir --only-binary=:all: \
+        torch==2.6.0 torchvision==0.21.0
+
+COPY requirements.txt /app/requirements.txt
+RUN python3 -m pip install --no-cache-dir --only-binary=:all: -r /app/requirements.txt
+
+# NOTE: there is deliberately NO weights fetch here. That is what made build 1 fail, and putting it back
+# would reintroduce a 57.7 GB download inside a 1800 second budget.
 COPY weights.py /app/weights.py
 COPY handler.py /app/handler.py
 

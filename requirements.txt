@@ -1,42 +1,40 @@
-# PINNED WHERE DRIFT WOULD CHANGE THE CONTESTANT, RANGED WHERE A RESOLVER KNOWS BETTER THAN I DO.
+# EVERY VERSION IS EXACT, AND THAT IS THE FIX.
 #
-# The first build of this worker failed on time. The second built in 7.7 minutes and then every job failed,
-# because diffusers was pinned to 0.33.1 while the model's own model_index.json at the pinned revision
-# declares `_class_name: QwenImagePipeline` and `_diffusers_version: 0.36.0.dev0`. 0.33.1 contains no
-# QwenImagePipeline, no QwenImageTransformer2DModel and no AutoencoderKLQwenImage, so there was nothing for
-# the loader to construct.
+# Build 1 died at the 1800 second ceiling downloading 57.7 GB of weights. Build 2 took 7.7 minutes and then
+# every job failed, because diffusers 0.33.1 has no QwenImagePipeline. Build 3 corrected diffusers but used
+# RANGES for transformers, accelerate and huggingface-hub, and hit the ceiling again at over 30 minutes
+# without downloading any weights at all. The cost was pip BACKTRACKING: an unbounded set over a tree that
+# includes torch makes the resolver try version after version, and that search alone can outlast the whole
+# build budget.
 #
-# Reading diffusers 0.42.1's own metadata instead of bumping only the obvious pin found two more that would
-# have failed on the next build: it requires huggingface-hub>=1.32 (pinned here at 0.30.2) and
-# safetensors>=0.8.0 (pinned here at 0.5.3). Fixing one pin at a time would have cost one 8 minute build
-# each to discover.
+# So nothing here is ranged, and the set was checked against each package's own published metadata rather
+# than assembled hopefully:
+#   diffusers 0.42.1    -> huggingface-hub>=1.32,<3 ; safetensors>=0.8.0 ; torch>=2.6
+#   transformers 5.22.2 -> huggingface-hub>=1.31,<3 ; safetensors>=0.8.0 ; tokenizers>=0.23.1,<0.24
+# huggingface-hub 2.4.0 and safetensors 0.8.0 satisfy both, so there is nothing left to search for.
+#
+# WHY diffusers 0.42.1 AND NOT THE ORIGINAL 0.33.1: the model's own model_index.json at the pinned
+# revision declares `_class_name: QwenImagePipeline` and `_diffusers_version: 0.36.0.dev0`. 0.33.1 contains
+# no QwenImagePipeline, no QwenImageTransformer2DModel and no AutoencoderKLQwenImage.
 
-runpod>=1.7,<2
+# Pinned to the line this handler was written against; serverless.start is stable here.
+runpod==1.7.7
 
-# torch stays on the line that matches the CUDA 12.4 base image. diffusers 0.42 asks for torch>=2.6, which
-# this satisfies, so there is no reason to move it and every reason not to.
+# Matches the CUDA 12.4 base image, and satisfies the torch>=2.6 that diffusers 0.42 asks for.
 torch==2.6.0
 torchvision==0.21.0
 
-# The floor that matters: QwenImagePipeline landed well before this, and 0.42.1 is the current release.
 diffusers==0.42.1
-
-# Ranged, because diffusers and transformers move together and the resolver tracks that better than a
-# hand-held pin. The floor is where Qwen2_5_VLForConditionalGeneration, the model's text encoder, is
-# comfortably available.
-transformers>=4.56,<6
-accelerate>=0.31
-
-# Required floors, taken from diffusers 0.42.1's metadata rather than guessed.
-huggingface-hub>=1.32,<3
-safetensors>=0.8.0
-
-hf-transfer>=0.1.9
-sentencepiece
-Pillow
+transformers==5.22.2
+accelerate==1.15.0
+huggingface-hub==2.4.0
+safetensors==0.8.0
+hf-transfer==0.1.9
+sentencepiece==0.2.3
+Pillow==13.0.0
 
 # This worker calls torchao.quantization.quantize_ directly rather than through the diffusers torchao
-# integration, so the integration's own >=0.15 floor does not apply. This is the line that pairs with torch
-# 2.6. If it ever stops providing float8, the handler reports bfloat16 WITH the reason rather than quietly
-# pretending otherwise.
+# integration, so that integration's own >=0.15 floor does not apply. This is the line that pairs with
+# torch 2.6. If it ever stops providing float8, the handler reports bfloat16 WITH the reason rather than
+# quietly pretending otherwise.
 torchao==0.10.0
