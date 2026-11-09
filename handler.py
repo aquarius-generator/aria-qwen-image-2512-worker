@@ -9,6 +9,10 @@ WEIGHTS ARE FETCHED ON FIRST START, NOT BAKED INTO THE IMAGE. 57.7 GB does not d
 network volume when one is attached, so the download happens once for the endpoint rather than once per
 worker, and the location used is echoed on every response.
 
+THE WARM-UP RUNS AT IMPORT, DURING WORKER INIT, NOT INSIDE THE FIRST JOB. The execution timeout bounds how
+long one REQUEST may run; it is not a budget for bringing a worker up. Doing a 57.7 GB fetch inside the
+first job spends that budget on a download and then kills the request that paid for it.
+
 FP8 IS APPLIED TO THE TRANSFORMER ONLY. That is where almost all the parameters are. The text encoder and
 VAE stay at bfloat16: quantising them saves little and costs visible quality, which would turn this into a
 test of a quantisation choice rather than of the model.
@@ -39,7 +43,7 @@ _offload = "none"
 _cache_kind = "unknown"
 _fetch_seconds = 0.0
 _load_seconds = 0.0
-_was_cold = True
+_init_error = None
 
 
 def _load():
@@ -49,10 +53,11 @@ def _load():
         return _pipe
 
     local_path, _cache_kind, _fetch_seconds = weights.ensure_weights()
-    print(f"[worker] weights ready at {local_path} ({_cache_kind}) in {_fetch_seconds}s")
+    print(f"[worker] weights ready at {local_path} ({_cache_kind}) in {_fetch_seconds}s", flush=True)
 
     started = time.time()
     # Loaded from the resolved local snapshot, so this can never quietly resolve to a newer revision.
+    # diffusers reads model_index.json and constructs QwenImagePipeline from it.
     pipe = DiffusionPipeline.from_pretrained(local_path, torch_dtype=torch.bfloat16)
 
     try:
@@ -60,13 +65,13 @@ def _load():
 
         quantize_(pipe.transformer, float8_dynamic_activation_float8_weight())
         _quantisation = "float8_dynamic"
-        print("[worker] transformer quantised to float8")
+        print("[worker] transformer quantised to float8", flush=True)
     except Exception as exc:  # noqa: BLE001
         # Reported, never silent. A worker that fell back to bfloat16 without saying so would be a different
         # contestant from the one the comparison is named after, and every output would carry the wrong
         # label. Echoing it is what makes that checkable from the caller.
         _quantisation = f"bfloat16 (float8 unavailable: {type(exc).__name__}: {exc})"
-        print(f"[worker] FP8 quantisation unavailable, running bfloat16: {exc}")
+        print(f"[worker] FP8 quantisation unavailable, running bfloat16: {exc}", flush=True)
 
     # The transformer alone is far larger than a 24 GB card, so it is never resident in full. Offload moves
     # submodules on and off the GPU around each forward pass.
@@ -74,7 +79,7 @@ def _load():
         pipe.enable_model_cpu_offload()
         _offload = "model_cpu_offload"
     except Exception as exc:  # noqa: BLE001
-        print(f"[worker] model cpu offload unavailable ({exc}); using sequential offload")
+        print(f"[worker] model cpu offload unavailable ({exc}); using sequential offload", flush=True)
         pipe.enable_sequential_cpu_offload()
         _offload = "sequential_cpu_offload"
 
@@ -85,7 +90,7 @@ def _load():
 
     pipe.set_progress_bar_config(disable=True)
     _load_seconds = round(time.time() - started, 1)
-    print(f"[worker] pipeline ready in {_load_seconds}s ({_quantisation}, {_offload})")
+    print(f"[worker] pipeline ready in {_load_seconds}s ({_quantisation}, {_offload})", flush=True)
     _pipe = pipe
     return _pipe
 
@@ -100,7 +105,6 @@ def _round16(value, default):
 
 
 def handler(job):
-    global _was_cold
     started = time.time()
     try:
         payload = job.get("input") or {}
@@ -133,7 +137,6 @@ def handler(job):
         buf = io.BytesIO()
         image.save(buf, format=fmt)
         data = base64.b64encode(buf.getvalue()).decode("utf-8")
-        _was_cold = False
 
         # Bytes, never a URL. The caller stores these permanently, and a signed link would expire long
         # before the comparison is judged.
@@ -157,5 +160,16 @@ def handler(job):
         traceback.print_exc()
         return {"error": f"{type(exc).__name__}: {exc}"}
 
+
+# WARM AT IMPORT. RunPod imports this module while the worker is initialising and before it is handed a
+# job, which is exactly where a long one-off fetch belongs. A failure here is printed in full and left for
+# the first request to surface as a plain error, rather than being swallowed into a worker that looks
+# healthy and fails every job it touches.
+try:
+    _load()
+except Exception as _exc:  # noqa: BLE001
+    _init_error = f"{type(_exc).__name__}: {_exc}"
+    print(f"[worker] INIT FAILED: {_init_error}", flush=True)
+    traceback.print_exc()
 
 runpod.serverless.start({"handler": handler})

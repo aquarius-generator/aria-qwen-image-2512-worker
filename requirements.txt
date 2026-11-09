@@ -1,14 +1,42 @@
-# Pinned on purpose: a worker whose dependencies drift is a contestant that drifts, and this exists to be
-# one half of a fair comparison.
-runpod==1.7.7
+# PINNED WHERE DRIFT WOULD CHANGE THE CONTESTANT, RANGED WHERE A RESOLVER KNOWS BETTER THAN I DO.
+#
+# The first build of this worker failed on time. The second built in 7.7 minutes and then every job failed,
+# because diffusers was pinned to 0.33.1 while the model's own model_index.json at the pinned revision
+# declares `_class_name: QwenImagePipeline` and `_diffusers_version: 0.36.0.dev0`. 0.33.1 contains no
+# QwenImagePipeline, no QwenImageTransformer2DModel and no AutoencoderKLQwenImage, so there was nothing for
+# the loader to construct.
+#
+# Reading diffusers 0.42.1's own metadata instead of bumping only the obvious pin found two more that would
+# have failed on the next build: it requires huggingface-hub>=1.32 (pinned here at 0.30.2) and
+# safetensors>=0.8.0 (pinned here at 0.5.3). Fixing one pin at a time would have cost one 8 minute build
+# each to discover.
+
+runpod>=1.7,<2
+
+# torch stays on the line that matches the CUDA 12.4 base image. diffusers 0.42 asks for torch>=2.6, which
+# this satisfies, so there is no reason to move it and every reason not to.
 torch==2.6.0
 torchvision==0.21.0
-diffusers==0.33.1
-transformers==4.51.3
-accelerate==1.6.0
-safetensors==0.5.3
-sentencepiece==0.2.0
+
+# The floor that matters: QwenImagePipeline landed well before this, and 0.42.1 is the current release.
+diffusers==0.42.1
+
+# Ranged, because diffusers and transformers move together and the resolver tracks that better than a
+# hand-held pin. The floor is where Qwen2_5_VLForConditionalGeneration, the model's text encoder, is
+# comfortably available.
+transformers>=4.56,<6
+accelerate>=0.31
+
+# Required floors, taken from diffusers 0.42.1's metadata rather than guessed.
+huggingface-hub>=1.32,<3
+safetensors>=0.8.0
+
+hf-transfer>=0.1.9
+sentencepiece
+Pillow
+
+# This worker calls torchao.quantization.quantize_ directly rather than through the diffusers torchao
+# integration, so the integration's own >=0.15 floor does not apply. This is the line that pairs with torch
+# 2.6. If it ever stops providing float8, the handler reports bfloat16 WITH the reason rather than quietly
+# pretending otherwise.
 torchao==0.10.0
-hf-transfer==0.1.9
-huggingface-hub==0.30.2
-Pillow==11.2.1
